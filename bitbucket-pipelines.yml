@@ -1,0 +1,48 @@
+#  Template maven-build
+
+#  This template allows you to test and build your Java project with Maven.
+#  The workflow allows running tests, code checkstyle and security scans on the default branch.
+
+# Prerequisites: pom.xml and appropriate project structure should exist in the repository.
+
+image:
+  name: nexus-repository.eu.ngrok.io/nexus/repository/stratos-docker-registry/kogito-quarkus-ci-builder-image:1.0.0
+  username: $NEXUS_USERNAME
+  password: $NEXUS_PASSWORD
+
+pipelines:
+  branches:
+    master:  # Trigger this for any pushes to the master branch.
+      - step:
+          name: Build and Deploy Snapshot Artifact
+          trigger: automatic
+          services:
+            - docker
+          caches:
+            - maven # Cache any dependencies we download, speeds up build times.
+            - docker
+          script:
+            - sed -i 's/%NEXUS_USERNAME%/${NEXUS_USERNAME}/' /etc/builder/settings.template.xml
+            - sed -i 's/%NEXUS_PASSWORD%/${NEXUS_PASSWORD}/' /etc/builder/settings.template.xml
+            - sed -i 's/%NEXUS_MAVEN_RELEASES_URL%/'"$NEXUS_MAVEN_RELEASES_URL"'/' /etc/builder/settings.template.xml
+            - sed -i 's/%NEXUS_MAVEN_SNAPSHOTS_URL%/'"$NEXUS_MAVEN_SNAPSHOTS_URL"'/' /etc/builder/settings.template.xml
+            - cat /etc/builder/settings.template.xml
+            - mvn -B -s /etc/builder/settings.template.xml verify # Ensure all artifacts build successfully before we attempt deploy in order to prevent partial deploys.
+            - mvn -B -s /etc/builder/settings.template.xml deploy # Now that all builds have completed, we can deploy all the artifacts.
+            - IMAGE_VERSION=$(xmlstarlet sel -t -m _:project -v _:version pom.xml)
+            - echo $IMAGE_VERSION
+            - docker login -u $NEXUS_USERNAME -p $NEXUS_PASSWORD nexus-repository.eu.ngrok.io/nexus/repository/stratos-docker-registry
+            - docker build -t ${NEXUS_DOCKER_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_VERSION} -f src/main/docker/Dockerfile.jvm .
+            - docker push ${NEXUS_DOCKER_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_VERSION}
+      - step:
+          name: Create Release Version # This will create a release version and commit it to master.  It will then be picked up and deployed in the first step.
+          trigger: manual
+          caches:
+            - maven
+          script:
+            - bash create-settings.sh # Create our settings.xml file.  Will fail if environment variables aren't set properly.
+            - bash validate-release-configuration.sh  # Do the best we can to ensure we have the SSH keys and env variables in place before we try to prepare a release.
+            - git config --global user.email "$GIT_USER_EMAIL"
+            - git config --global user.name "$GIT_USER_NAME"
+            - mvn -B -s settings.xml -DdryRun=true release:prepare # Ensure that most things will run properly before we do the real work.
+            - mvn -B -s settings.xml release:clean release:prepare # This bumps the versions in the poms, creates new commits, which will then get built by the master branch trigger.
